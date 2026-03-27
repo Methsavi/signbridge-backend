@@ -11,4 +11,5 @@ class HistoryItem(BaseModel):
 
 class TranslationRequest(BaseModel):
     text: str
-    target_lang: str # e.g., 'si' for Sinhala, 'fr' for French
+    target_lang: str
+    source_lang: str = "auto"

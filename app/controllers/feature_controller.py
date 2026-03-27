@@ -2,15 +2,21 @@ from deep_translator import GoogleTranslator
 from app.core.database import get_database
 from app.models.history_model import HistoryItem
 from datetime import datetime
-from bson import ObjectId  # <--- NEW IMPORT
+from bson import ObjectId
 
 
 # --- TRANSLATION LOGIC ---
-def translate_text(text: str, target_lang: str):
+def translate_text(text: str, target_lang: str, source_lang: str = 'auto'):
     try:
-        translator = GoogleTranslator(source='auto', target=target_lang)
+        # Use the provided source_lang (or 'auto')
+        translator = GoogleTranslator(source=source_lang, target=target_lang)
         translated = translator.translate(text)
-        return {"original": text, "translated": translated, "lang": target_lang}
+        return {
+            "original": text,
+            "translated": translated,
+            "source": source_lang,
+            "target": target_lang
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -40,13 +46,11 @@ def get_user_history(user_id: str):
     return results
 
 
-# --- NEW DELETE FUNCTION ---
 def delete_history_item(item_id: str, user_id: str):
     db = get_database()
     history_collection = db["history"]
 
     try:
-        # Check both ID and UserID to ensure users can't delete each other's data
         result = history_collection.delete_one({
             "_id": ObjectId(item_id),
             "user_id": user_id

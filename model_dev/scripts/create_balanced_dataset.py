@@ -8,13 +8,13 @@ OUTPUT_FILE = "sign_data_clean.csv"
 IMAGES_PER_CLASS = 1000
 
 # --- CORRECTED PATHS ---
-# Based on your actual folder structure in 'model_dev/data/raw/'
+# These match the folders you saw in check_folders.py
 DATASET_PATHS = [
-    "asl_alphabet_train",  # Matches your first folder
-    "Sign-Language-Digits-Dataset",  # Matches your second folder
-    "Sign-Language-Digits-Dataset1",  # Matches your third folder
-    "asl_dataset",  # Matches your fourth folder
-    "asl_dataset1"  # Matches your fifth folder
+    "asl_alphabet_train",
+    "Sign-Language-Digits-Dataset",
+    "Sign-Language-Digits-Dataset1",
+    "asl_dataset",
+    "asl_dataset1"
 ]
 
 # --- SETUP ---
@@ -34,9 +34,11 @@ hands = mp_hands.Hands(
 def process_all():
     print(f"🚀 Starting Master Processing...")
     print(f"   Looking for datasets in: {RAW_DIR}")
+
+    # Debug: Print what paths we are actually using
+    print(f"   Target Folders: {DATASET_PATHS}")
     print(f"💾 Saving to: {OUTPUT_CSV_PATH}")
 
-    # Create/Overwrite the file
     with open(OUTPUT_CSV_PATH, mode='w', newline='') as f:
         writer = csv.writer(f)
         header = ["label"]
@@ -49,22 +51,25 @@ def process_all():
 
             if not os.path.exists(full_path):
                 print(f"\n⚠️ WARNING: Folder not found: {full_path}")
-                print(f"   Skipping '{dataset_name}'...")
                 continue
 
             print(f"\n📂 Reading Dataset: {dataset_name}")
 
-            # Handling nested structure: sometimes 'asl_alphabet_train' is inside 'asl_alphabet_train'
-            # Let's check if the subfolders are classes (A, B) or another wrapper folder
-            contents = os.listdir(full_path)
-            first_item = os.path.join(full_path, contents[0])
-
+            # --- NESTED FOLDER DETECTION ---
             target_dir = full_path
-
-            # Logic to auto-detect if there is an extra nested folder (common in Kaggle zips)
-            if len(contents) == 1 and os.path.isdir(first_item):
-                print(f"   ↳ Detected nested folder. Entering '{contents[0]}'...")
-                target_dir = first_item
+            try:
+                contents = os.listdir(full_path)
+                # Check if it's a double-nested folder (common in Kaggle)
+                if len(contents) == 1 and os.path.isdir(os.path.join(full_path, contents[0])):
+                    # Double check if this inner folder contains the classes
+                    inner_path = os.path.join(full_path, contents[0])
+                    inner_contents = os.listdir(inner_path)
+                    if len(inner_contents) > 5:  # Likely classes (A, B, C...)
+                        print(f"   ↳ Detected nested folder: {contents[0]}")
+                        target_dir = inner_path
+            except Exception as e:
+                print(f"   Error checking folder: {e}")
+                continue
 
             classes = sorted(os.listdir(target_dir))
 
@@ -73,7 +78,6 @@ def process_all():
                 if not os.path.isdir(class_dir):
                     continue
 
-                # Optional: Skip 'nothing' or 'space' if you don't want them
                 if label.lower() in ["nothing", "space", "del"]:
                     continue
 
@@ -101,12 +105,12 @@ def process_all():
                                     row.append(lm.y)
                                 writer.writerow(row)
                                 count += 1
-                    except Exception as e:
+                    except Exception:
                         pass
 
                 print(f"     ✅ Saved {count} samples")
 
-    print("\n🎉 DONE! You now have a perfectly balanced dataset at 'sign_data_clean.csv'.")
+    print("\n🎉 DONE! Dataset creation complete.")
 
 
 if __name__ == "__main__":

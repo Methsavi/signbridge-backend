@@ -51,9 +51,7 @@ def load_ai_model():
 
 
 def process_frame(base64_image: str):
-    """
-    Takes a base64 image string, extracts landmarks, and predicts the sign.
-    """
+
     global model, hands, feature_columns
 
     if model is None:
