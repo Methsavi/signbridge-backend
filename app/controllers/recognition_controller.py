@@ -2,7 +2,7 @@ import pickle
 import cv2
 import mediapipe as mp
 import numpy as np
-import pandas as pd  # <--- NEW: Import pandas
+import pandas as pd
 import base64
 import os
 import warnings
@@ -51,7 +51,6 @@ def load_ai_model():
 
 
 def process_frame(base64_image: str):
-
     global model, hands, feature_columns
 
     if model is None:
@@ -76,9 +75,15 @@ def process_frame(base64_image: str):
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
                 data_aux = []
+                visual_landmarks = []  # <--- NEW: Create an empty list to hold the drawing coordinates
+
                 for lm in hand_landmarks.landmark:
+                    # Append flat data for the AI Model prediction
                     data_aux.append(lm.x)
                     data_aux.append(lm.y)
+
+                    # <--- NEW: Append structured x/y data for the React Canvas overlay
+                    visual_landmarks.append({"x": lm.x, "y": lm.y})
 
                 # --- FIX: CREATE DATAFRAME WITH NAMES ---
                 # We convert the raw list into a DataFrame with column names
@@ -95,10 +100,12 @@ def process_frame(base64_image: str):
 
                 return {
                     "sign": predicted_character,
-                    "confidence": round(confidence * 100, 2)
+                    "confidence": round(confidence * 100, 2),
+                    "landmarks": visual_landmarks  # <--- NEW: Send the drawing coordinates back to the frontend!
                 }
 
-        return {"sign": "...", "confidence": 0}
+        # <--- NEW: Added "landmarks": None so React knows to clear the screen when no hand is detected
+        return {"sign": "...", "confidence": 0, "landmarks": None}
 
     except Exception as e:
         # Only print real errors, not connection closed messages
