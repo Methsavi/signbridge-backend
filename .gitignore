@@ -100,4 +100,4 @@ model_dev/data/processed/
 model_dev/data/sign-images-dataset/
 
 model_dev/saved_models/*.p
-model_dev/data/sign_data.csv
+model_dev/data/sign_data_old.csv
