@@ -1,29 +1,47 @@
 import os
+import sys
+
+# --- MANDATORY ENVIRONMENT FIXES (Must be the absolute first lines) ---
+# This forces the Protobuf library to use the pure-python implementation
+# which is the only version compatible with MediaPipe on Windows.
+os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 import uvicorn
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
+# Local imports must happen AFTER the environment variables are set
 from app.core.database import connect_to_mongodb, close_mongodb_connection
 from app.routes.user_routes import router as user_router
-# Import the new AI components
 from app.routes.recognition_routes import router as recognition_router
-from app.controllers.recognition_controller import load_ai_model
+from app.controllers.recognition_controller import load_ai_models
 from app.routes.feature_routes import router as feature_router
+from app.services.r2_storage import ensure_profile_image_directory
 
 load_dotenv()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- STARTUP ---
+    print("🚀 Starting SignBridge Backend...")
     connect_to_mongodb()
-    load_ai_model() # <--- Load the AI Brain here!
+    ensure_profile_image_directory()
+
+    # Initialize MediaPipe and TensorFlow
+    load_ai_models()
+
     yield
     # --- SHUTDOWN ---
+    print("🛑 Shutting down SignBridge Backend...")
     close_mongodb_connection()
 
-app = FastAPI(title="SignBridge API", lifespan=lifespan)
+
+app = FastAPI(title="SignBridge AI", lifespan=lifespan)
 
 # CORS Config
 app.add_middleware(
@@ -36,12 +54,15 @@ app.add_middleware(
 
 # Register Routes
 app.include_router(user_router)
-app.include_router(recognition_router) # <--- Add the WebSocket route
+app.include_router(recognition_router)
 app.include_router(feature_router)
+
 
 @app.get("/")
 def root():
     return {"message": "SignBridge API is running!"}
 
+
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+    # reload=False ensures the environment state remains stable on Windows
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False)

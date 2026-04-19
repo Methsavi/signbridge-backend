@@ -1,4 +1,4 @@
-from fastapi import APIRouter, status, Body, HTTPException, UploadFile, File
+from fastapi import APIRouter, status, Body, HTTPException, UploadFile, File, Query
 from app.controllers.user_controller import create_user_mongo, login_user_mongo, update_profile_picture
 from app.models.user_model import User, UserLogin
 from bson import ObjectId
@@ -49,7 +49,11 @@ def login(credentials: UserLogin = Body(...)):
 
 # --- UPLOAD PROFILE PICTURE ---
 @router.patch("/{user_id}/profile-picture")
-async def upload_profile_pic(user_id: str, file: UploadFile = File(...)):
+async def upload_profile_pic(
+    user_id: str,
+    file: UploadFile = File(...),
+    email: str | None = Query(default=None),
+):
     try:
         # 1. Read file
         file_content = await file.read()
@@ -59,12 +63,21 @@ async def upload_profile_pic(user_id: str, file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="Image too large (Max 5MB)")
 
         # 3. Process
-        result = update_profile_picture(user_id, file_content, file.content_type)
+        result = update_profile_picture(
+            user_id=user_id,
+            file_data=file_content,
+            content_type=file.content_type,
+            file_name=file.filename,
+            user_email=email,
+        )
 
         if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
+            status_code = 404 if result["error"] == "User not found" else 400
+            raise HTTPException(status_code=status_code, detail=result["error"])
 
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
