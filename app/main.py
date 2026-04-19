@@ -18,8 +18,9 @@ from starlette.middleware.cors import CORSMiddleware
 from app.core.database import connect_to_mongodb, close_mongodb_connection
 from app.routes.user_routes import router as user_router
 from app.routes.recognition_routes import router as recognition_router
-from app.controllers.recognition_controller import load_ai_model
+from app.controllers.recognition_controller import load_ai_models
 from app.routes.feature_routes import router as feature_router
+from app.services.r2_storage import ensure_profile_image_directory
 
 load_dotenv()
 
@@ -29,9 +30,10 @@ async def lifespan(app: FastAPI):
     # --- STARTUP ---
     print("🚀 Starting SignBridge Backend...")
     connect_to_mongodb()
+    ensure_profile_image_directory()
 
     # Initialize MediaPipe and TensorFlow
-    load_ai_model()
+    load_ai_models()
 
     yield
     # --- SHUTDOWN ---
