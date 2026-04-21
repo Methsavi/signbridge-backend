@@ -20,6 +20,7 @@ from app.routes.user_routes import router as user_router
 from app.routes.recognition_routes import router as recognition_router
 from app.controllers.recognition_controller import load_ai_models
 from app.routes.feature_routes import router as feature_router
+from app.routes.feedback_routes import router as feedback_router
 from app.services.r2_storage import ensure_profile_image_directory
 
 load_dotenv()
@@ -56,6 +57,7 @@ app.add_middleware(
 app.include_router(user_router)
 app.include_router(recognition_router)
 app.include_router(feature_router)
+app.include_router(feedback_router)
 
 
 @app.get("/")
