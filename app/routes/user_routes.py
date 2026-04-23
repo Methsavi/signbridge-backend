@@ -229,4 +229,10 @@ def get_user_profile(user_id: str):
             }
         raise HTTPException(status_code=404, detail="User not found")
     except Exception as e:
+    #     raise HTTPException(status_code=500, detail=str(e))e")
+    #         }
+    #     raise HTTPException(status_code=404, detail="User not found")
+    # except HTTPException:
+    #     raise
+    # except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

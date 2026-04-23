@@ -1,9 +1,11 @@
 from pydantic import BaseModel, EmailStr
+from typing import Optional
 
 class User(BaseModel):
     username: str
     email: EmailStr
     password: str
+    appwrite_id: Optional[str] = None  # Appwrite user.$id, stored for cross-referencing
 
 class UserLogin(BaseModel):
     email: EmailStr
