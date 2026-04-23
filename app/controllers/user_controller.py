@@ -19,7 +19,12 @@ def create_user_mongo(user: User):
     db = get_database()
     users_collection = db["users"]
 
+    # Check for existing email
     if users_collection.find_one({"email": user.email}):
+        return {"msg": "Email already registered"}
+
+    # If appwrite_id provided, also check it's not already linked
+    if user.appwrite_id and users_collection.find_one({"appwrite_id": user.appwrite_id}):
         return {"msg": "Email already registered"}
 
     hashed_pw = hash_password(user.password)
@@ -28,6 +33,7 @@ def create_user_mongo(user: User):
         "username": user.username,
         "email": user.email,
         "hashed_password": hashed_pw,
+        "appwrite_id": user.appwrite_id,  # Store Appwrite user.$id (may be None for legacy)
         "created_at": datetime.now(timezone.utc),
         "last_active": datetime.now(timezone.utc),
         "role": "User",
@@ -317,6 +323,9 @@ def update_profile_picture(
         user_doc = None
         if ObjectId.is_valid(user_id):
             user_doc = users_collection.find_one({"_id": ObjectId(user_id)})
+        # Also try Appwrite ID — the frontend passes user.$id as user_id
+        if not user_doc:
+            user_doc = users_collection.find_one({"appwrite_id": user_id})
         if not user_doc and user_email:
             user_doc = users_collection.find_one({"email": user_email})
 

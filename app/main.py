@@ -20,6 +20,7 @@ from app.routes.user_routes import router as user_router
 from app.routes.recognition_routes import router as recognition_router
 from app.controllers.recognition_controller import load_ai_models
 from app.routes.feature_routes import router as feature_router
+from app.routes.feedback_routes import router as feedback_router
 from app.services.r2_storage import ensure_profile_image_directory
 
 load_dotenv()
@@ -44,9 +45,24 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SignBridge AI", lifespan=lifespan)
 
 # CORS Config
+# Note: allow_origins=["*"] cannot be used with allow_credentials=True (browsers reject it).
+# Explicitly list all allowed origins instead.
+FRONTEND_VERCEL_URL = os.getenv("FRONTEND_VERCEL_URL", "")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:5174",
+]
+if FRONTEND_URL and FRONTEND_URL not in allowed_origins:
+    allowed_origins.append(FRONTEND_URL)
+if FRONTEND_VERCEL_URL and FRONTEND_VERCEL_URL not in allowed_origins:
+    allowed_origins.append(FRONTEND_VERCEL_URL)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,6 +72,7 @@ app.add_middleware(
 app.include_router(user_router)
 app.include_router(recognition_router)
 app.include_router(feature_router)
+app.include_router(feedback_router)
 
 
 @app.get("/")
