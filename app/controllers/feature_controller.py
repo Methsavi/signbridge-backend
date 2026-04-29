@@ -3,6 +3,8 @@ from app.core.database import get_database
 from app.models.history_model import HistoryItem
 from datetime import datetime
 from bson import ObjectId
+from gtts import gTTS
+import io
 
 
 # --- TRANSLATION LOGIC ---
@@ -62,3 +64,20 @@ def delete_history_item(item_id: str, user_id: str):
             return {"error": "Item not found or permission denied"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# --- TEXT-TO-SPEECH LOGIC ---
+def synthesize_speech(text: str, language_code: str) -> bytes:
+    """
+    Synthesizes speech using gTTS (Google Translate TTS — free, no API key).
+    Returns raw MP3 bytes.
+    Raises ValueError for unsupported language codes (caller returns 422).
+    """
+    try:
+        tts = gTTS(text=text, lang=language_code, slow=False)
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        return fp.read()
+    except ValueError as e:
+        raise ValueError(f"Language '{language_code}' is not supported: {e}")
