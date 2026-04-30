@@ -1,4 +1,5 @@
 import os
+import time
 
 # --- ENV FIXES ---
 os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
@@ -11,254 +12,554 @@ import tensorflow as tf
 import joblib
 import base64
 import warnings
+from collections import deque
+from scipy.interpolate import interp1d
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- PATHS ---
+# ─────────────────────────────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Alphabet
-ALPHABET_MODEL = os.path.join(BASE_DIR, "model_dev", "saved_models", "alphabet", "best_alphabet_model.keras")
-ALPHABET_SCALER = os.path.join(BASE_DIR, "model_dev", "saved_models", "alphabet", "alphabet_scaler.pkl")
+ALPHABET_MODEL   = os.path.join(BASE_DIR, "model_dev", "saved_models", "alphabet", "best_alphabet_model.keras")
+ALPHABET_SCALER  = os.path.join(BASE_DIR, "model_dev", "saved_models", "alphabet", "alphabet_scaler.pkl")
 ALPHABET_ENCODER = os.path.join(BASE_DIR, "model_dev", "saved_models", "alphabet", "alphabet_encoder.pkl")
 
 # Number
-NUMBER_MODEL = os.path.join(BASE_DIR, "model_dev", "saved_models", "number", "best_number_model.keras")
-NUMBER_SCALER = os.path.join(BASE_DIR, "model_dev", "saved_models", "number", "number_scaler.pkl")
-NUMBER_ENCODER = os.path.join(BASE_DIR, "model_dev", "saved_models", "number", "number_label_encoder.pkl")
-NUMBER_IMPUTER = os.path.join(BASE_DIR, "model_dev", "saved_models", "number", "number_imputer.pkl")
+NUMBER_MODEL   = os.path.join(BASE_DIR, "model_dev", "saved_models", "number", "best_number_model.keras")
+NUMBER_SCALER  = os.path.join(BASE_DIR, "model_dev", "saved_models", "number", "number_scaler.pkl")
+NUMBER_ENCODER = os.path.join(BASE_DIR, "model_dev", "saved_models", "number", "number_encoder.pkl")
 
-# Word
-WORD_MODEL = os.path.join(BASE_DIR, "model_dev", "saved_models", "word", "best_wlasl10_bilstm.keras")
-WORD_ENCODER = os.path.join(BASE_DIR, "model_dev", "saved_models", "word", "wlasl10_label_encoder.pkl")
+# Word (new Transformer model)
+WORD_MODEL   = os.path.join(BASE_DIR, "model_dev", "saved_models", "word", "best_word_model.keras")
+WORD_ENCODER = os.path.join(BASE_DIR, "model_dev", "saved_models", "word", "word_encoder.pkl")
+WORD_SCALER  = os.path.join(BASE_DIR, "model_dev", "saved_models", "word", "word_scaler.pkl")
 
-# --- GLOBALS ---
-alphabet_model = None
-alphabet_scaler = None
+# ─────────────────────────────────────────────────────────────────────
+# THRESHOLDS & TIMING
+# ─────────────────────────────────────────────────────────────────────
+ALPHABET_THRESHOLD = 0.75
+NUMBER_THRESHOLD   = 0.80
+WORD_THRESHOLD     = 0.40   # Lower threshold — show top3 even when less confident
+
+HOLD_DURATION  = 0.6   # seconds user must hold a sign before commit
+COOLDOWN_AFTER = 3.0   # seconds before same sign can commit again
+
+# Word model config — must match training
+WORD_SEQ_LEN   = 30
+WORD_FEAT_DIM  = 126   # 21 landmarks × 2 hands × 3 (x,y,z)
+WORD_MIN_FRAMES = 8
+
+# ─────────────────────────────────────────────────────────────────────
+# GLOBALS
+# ─────────────────────────────────────────────────────────────────────
+alphabet_model   = None
+alphabet_scaler  = None
 alphabet_encoder = None
 
-number_model = None
-number_scaler = None
+number_model   = None
+number_scaler  = None
 number_encoder = None
-number_imputer = None
 
-word_model = None
+word_model   = None
 word_encoder = None
+word_scaler  = None
 
-hands = None
-pose = None
+hands    = None   # MediaPipe Hands (alphabet + number)
+holistic = None   # MediaPipe Holistic (word — captures both hands)
+pose     = None   # MediaPipe Pose (kept for compatibility)
 
-frame_buffer = []
-SEQUENCE_LENGTH = 32
-POSE_LANDMARKS_TO_USE = 25
+# Word frame collection state
+_word_frame_buffer  = []
+_word_is_collecting = False
 
 
+# ─────────────────────────────────────────────────────────────────────
+# SMOOTHER & VOTER  (alphabet + number)
+# ─────────────────────────────────────────────────────────────────────
+class LandmarkSmoother:
+    """Temporal average over last N frames — kills MediaPipe jitter."""
+    def __init__(self, window=5):
+        self.buf = deque(maxlen=window)
+
+    def smooth(self, landmarks_flat):
+        self.buf.append(landmarks_flat)
+        return np.mean(self.buf, axis=0)
+
+    def reset(self):
+        self.buf.clear()
+
+
+class PredictionVoter:
+    """Weighted majority vote — stops predictions flickering every frame."""
+    def __init__(self, window=7):
+        self.buf = deque(maxlen=window)
+
+    def vote(self, prediction, confidence):
+        self.buf.append((prediction, confidence))
+        if len(self.buf) < 3:
+            return None, 0.0
+        votes = {}
+        for pred, conf in self.buf:
+            votes[pred] = votes.get(pred, 0) + conf
+        best     = max(votes, key=votes.get)
+        avg_conf = votes[best] / len(self.buf)
+        return best, avg_conf
+
+    def reset(self):
+        self.buf.clear()
+
+
+_alphabet_smoother = LandmarkSmoother(window=5)
+_alphabet_voter    = PredictionVoter(window=7)
+_number_smoother   = LandmarkSmoother(window=5)
+_number_voter      = PredictionVoter(window=7)
+
+# Alphabet hold/commit state
+_last_committed_sign = None
+_last_committed_time = 0.0
+_sign_hold_start     = 0.0
+_current_held_sign   = None
+
+# Number hold/commit state
+_num_last_committed_sign = None
+_num_last_committed_time = 0.0
+_num_sign_hold_start     = 0.0
+_num_current_held_sign   = None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# MODEL LOADING
+# ─────────────────────────────────────────────────────────────────────
 def load_ai_models():
     global alphabet_model, alphabet_scaler, alphabet_encoder
-    global number_model, number_scaler, number_encoder, number_imputer
-    global word_model, word_encoder, hands, pose
+    global number_model, number_scaler, number_encoder
+    global word_model, word_encoder, word_scaler
+    global hands, holistic, pose
 
     print("BASE_DIR:", BASE_DIR)
-
-    print("Alphabet model:", ALPHABET_MODEL, os.path.exists(ALPHABET_MODEL))
-    print("Alphabet scaler:", ALPHABET_SCALER, os.path.exists(ALPHABET_SCALER))
-    print("Alphabet encoder:", ALPHABET_ENCODER, os.path.exists(ALPHABET_ENCODER))
-
-    print("Number model:", NUMBER_MODEL, os.path.exists(NUMBER_MODEL))
-    print("Number scaler:", NUMBER_SCALER, os.path.exists(NUMBER_SCALER))
-    print("Number encoder:", NUMBER_ENCODER, os.path.exists(NUMBER_ENCODER))
-    print("Number imputer:", NUMBER_IMPUTER, os.path.exists(NUMBER_IMPUTER))
-
-    print("Word model:", WORD_MODEL, os.path.exists(WORD_MODEL))
-    print("Word encoder:", WORD_ENCODER, os.path.exists(WORD_ENCODER))
-
     print("🚀 Loading ALL AI models...")
 
-    alphabet_model = tf.keras.models.load_model(ALPHABET_MODEL)
-    alphabet_scaler = joblib.load(ALPHABET_SCALER)
+    # ── Alphabet ──────────────────────────────────────────────────────
+    print("\n--- Alphabet ---")
+    print("  model  :", ALPHABET_MODEL,   "| exists:", os.path.exists(ALPHABET_MODEL))
+    print("  scaler :", ALPHABET_SCALER,  "| exists:", os.path.exists(ALPHABET_SCALER))
+    print("  encoder:", ALPHABET_ENCODER, "| exists:", os.path.exists(ALPHABET_ENCODER))
+    alphabet_model   = tf.keras.models.load_model(ALPHABET_MODEL)
+    alphabet_scaler  = joblib.load(ALPHABET_SCALER)
     alphabet_encoder = joblib.load(ALPHABET_ENCODER)
+    print("  ✅ Alphabet model loaded")
 
-    number_model = tf.keras.models.load_model(NUMBER_MODEL)
-    number_scaler = joblib.load(NUMBER_SCALER)
-    number_encoder = joblib.load(NUMBER_ENCODER)
-    number_imputer = joblib.load(NUMBER_IMPUTER)
+    # ── Number ────────────────────────────────────────────────────────
+    print("\n--- Number ---")
+    print("  model  :", NUMBER_MODEL,   "| exists:", os.path.exists(NUMBER_MODEL))
+    print("  scaler :", NUMBER_SCALER,  "| exists:", os.path.exists(NUMBER_SCALER))
+    print("  encoder:", NUMBER_ENCODER, "| exists:", os.path.exists(NUMBER_ENCODER))
+    if os.path.exists(NUMBER_MODEL):
+        number_model   = tf.keras.models.load_model(NUMBER_MODEL)
+        number_scaler  = joblib.load(NUMBER_SCALER)
+        number_encoder = joblib.load(NUMBER_ENCODER)
+        print("  ✅ Number model loaded")
+    else:
+        print("  ⚠️  Number model not found — skipping")
 
-    word_model = tf.keras.models.load_model(WORD_MODEL)
-    word_encoder = joblib.load(WORD_ENCODER)
+    # ── Word (new Transformer) ────────────────────────────────────────
+    print("\n--- Word ---")
+    print("  model  :", WORD_MODEL,   "| exists:", os.path.exists(WORD_MODEL))
+    print("  encoder:", WORD_ENCODER, "| exists:", os.path.exists(WORD_ENCODER))
+    print("  scaler :", WORD_SCALER,  "| exists:", os.path.exists(WORD_SCALER))
+    if os.path.exists(WORD_MODEL):
+        word_model   = tf.keras.models.load_model(WORD_MODEL)
+        word_encoder = joblib.load(WORD_ENCODER)
+        word_scaler  = joblib.load(WORD_SCALER)
+        print("  ✅ Word model loaded (Transformer)")
+    else:
+        print("  ⚠️  Word model not found — skipping")
 
+    # ── MediaPipe ─────────────────────────────────────────────────────
     import mediapipe as mp
 
-    hands_module = mp.solutions.hands
-    pose_module = mp.solutions.pose
+    # Hands — for alphabet and number (single hand, fast)
+    hands = mp.solutions.hands.Hands(
+        static_image_mode=False,
+        max_num_hands=1,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.5,
+        model_complexity=1
+    )
 
-    hands = hands_module.Hands(
-        static_image_mode=True,
-        max_num_hands=2,
+    # Holistic — for word mode (captures both hands simultaneously)
+    holistic = mp.solutions.holistic.Holistic(
+        static_image_mode=False,
+        model_complexity=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.4
+    )
+
+    # Pose — kept for backward compatibility
+    pose = mp.solutions.pose.Pose(
+        static_image_mode=False,
         min_detection_confidence=0.5
     )
 
-    pose = pose_module.Pose(
-        static_image_mode=True,
-        min_detection_confidence=0.5
-    )
-
-    print("✅ All models loaded successfully!")
+    print("\n✅ All models loaded successfully!")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# SHARED UTILITIES
+# ─────────────────────────────────────────────────────────────────────
 def decode_base64_image(base64_image: str):
     if ',' in base64_image:
         base64_image = base64_image.split(',')[1]
-
     image_bytes = base64.b64decode(base64_image)
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    return frame
+    nparr       = np.frombuffer(image_bytes, np.uint8)
+    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
 
-# =========================
-# ALPHABET / NUMBER HELPERS
-# =========================
-def extract_hand_xyz_features_and_visual(base64_image):
+def normalize_landmarks(hand_landmarks):
+    """
+    Scale + position invariant landmark features.
+    1. Extract 21 (x,y,z) → shape (21,3)
+    2. Center at wrist (index 0)
+    3. Scale by wrist→middle-MCP distance (index 9)
+    4. Flatten to 63 features
+    """
+    lm  = np.array([[l.x, l.y, l.z] for l in hand_landmarks.landmark])
+    lm -= lm[0]
+    ref = np.linalg.norm(lm[9])
+    if ref > 1e-6:
+        lm /= ref
+    return lm.flatten()
+
+
+def extract_visual_landmarks(hand_landmarks):
+    """Raw x,y for frontend skeleton drawing (un-normalized screen coords)."""
+    return [{"x": lm.x, "y": lm.y} for lm in hand_landmarks.landmark]
+
+
+def _apply_hold_cooldown(voted_label, voted_conf,
+                         current_held, hold_start,
+                         last_committed, last_committed_time,
+                         voter):
+    """
+    Shared hold + cooldown logic for alphabet and number.
+    User must hold a sign for HOLD_DURATION seconds to commit it.
+    Same sign needs COOLDOWN_AFTER seconds before it can commit again.
+    """
+    now       = time.time()
+    committed = False
+
+    if voted_label != current_held:
+        current_held = voted_label
+        hold_start   = now
+
+    held_for      = now - hold_start
+    hold_progress = min(held_for / HOLD_DURATION, 1.0)
+
+    if held_for >= HOLD_DURATION:
+        since_last = now - last_committed_time
+        same_sign  = (voted_label == last_committed)
+
+        if not same_sign or since_last >= COOLDOWN_AFTER:
+            committed           = True
+            last_committed      = voted_label
+            last_committed_time = now
+            hold_start          = now
+            voter.reset()
+
+    return (committed, hold_progress,
+            current_held, hold_start,
+            last_committed, last_committed_time)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ALPHABET PREDICTOR
+# ─────────────────────────────────────────────────────────────────────
+def predict_alphabet(base64_image: str) -> dict:
+    """
+    WebSocket handler for /ws/predict/alphabet.
+
+    Returns:
+      sign          — current best prediction ("..." if uncertain)
+      confidence    — float
+      landmarks     — list of {x,y} for frontend skeleton
+      committed     — bool: True = append this letter to input text
+      hold_progress — float 0.0→1.0 for optional hold progress bar
+    """
+    global _last_committed_sign, _last_committed_time
+    global _sign_hold_start, _current_held_sign
+
     frame = decode_base64_image(base64_image)
     if frame is None:
-        return None, None
+        return {"sign": "...", "confidence": 0.0, "landmarks": None,
+                "committed": False, "hold_progress": 0.0}
 
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hands.process(frame_rgb)
+    result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-    if not results.multi_hand_landmarks:
-        return None, None
+    if not result.multi_hand_landmarks:
+        _alphabet_smoother.reset()
+        _alphabet_voter.reset()
+        _current_held_sign = None
+        _sign_hold_start   = 0.0
+        return {"sign": "...", "confidence": 0.0, "landmarks": None,
+                "committed": False, "hold_progress": 0.0}
 
-    raw = []
-    visual = []
+    hand_lm = result.multi_hand_landmarks[0]
+    visual  = extract_visual_landmarks(hand_lm)
 
-    for lm in results.multi_hand_landmarks[0].landmark:
-        raw.extend([lm.x, lm.y, lm.z])
-        visual.append({"x": lm.x, "y": lm.y})
+    norm     = normalize_landmarks(hand_lm)
+    smoothed = _alphabet_smoother.smooth(norm)
+    scaled   = alphabet_scaler.transform(smoothed.reshape(1, -1))
+    probs    = alphabet_model.predict(scaled, verbose=0)[0]
 
-    return np.array(raw, dtype=np.float32), visual
+    confidence = float(np.max(probs))
+    raw_label  = alphabet_encoder.inverse_transform([int(np.argmax(probs))])[0]
+    voted_label, voted_conf = _alphabet_voter.vote(raw_label, confidence)
+
+    if voted_label is None or voted_conf < ALPHABET_THRESHOLD:
+        return {"sign": "...", "confidence": round(confidence, 4),
+                "landmarks": visual, "committed": False, "hold_progress": 0.0}
+
+    (committed, hold_progress,
+     _current_held_sign, _sign_hold_start,
+     _last_committed_sign, _last_committed_time) = _apply_hold_cooldown(
+        voted_label, voted_conf,
+        _current_held_sign, _sign_hold_start,
+        _last_committed_sign, _last_committed_time,
+        _alphabet_voter
+    )
+
+    return {
+        "sign":          voted_label,
+        "confidence":    round(voted_conf, 4),
+        "landmarks":     visual,
+        "committed":     committed,
+        "hold_progress": round(hold_progress, 2)
+    }
 
 
-# =========================
-# WORD HELPERS
-# =========================
-def extract_word_frame_features(base64_image):
+# ─────────────────────────────────────────────────────────────────────
+# NUMBER PREDICTOR
+# ─────────────────────────────────────────────────────────────────────
+def predict_number(base64_image: str) -> dict:
+    """
+    WebSocket handler for /ws/predict/number.
+
+    Returns:
+      sign, confidence, landmarks, committed, hold_progress
+    """
+    global _num_last_committed_sign, _num_last_committed_time
+    global _num_sign_hold_start, _num_current_held_sign
+
+    if number_model is None:
+        return {"sign": "...", "confidence": 0.0, "landmarks": None,
+                "committed": False, "hold_progress": 0.0}
+
     frame = decode_base64_image(base64_image)
     if frame is None:
-        return None
+        return {"sign": "...", "confidence": 0.0, "landmarks": None,
+                "committed": False, "hold_progress": 0.0}
 
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-    hand_result = hands.process(frame_rgb)
-    pose_result = pose.process(frame_rgb)
+    if not result.multi_hand_landmarks:
+        _number_smoother.reset()
+        _number_voter.reset()
+        _num_current_held_sign = None
+        _num_sign_hold_start   = 0.0
+        return {"sign": "...", "confidence": 0.0, "landmarks": None,
+                "committed": False, "hold_progress": 0.0}
 
-    left_hand = np.zeros((21, 2), dtype=np.float32)
-    right_hand = np.zeros((21, 2), dtype=np.float32)
+    hand_lm = result.multi_hand_landmarks[0]
+    visual  = extract_visual_landmarks(hand_lm)
 
-    if hand_result.multi_hand_landmarks and hand_result.multi_handedness:
-        for hand_landmarks, handedness in zip(hand_result.multi_hand_landmarks, hand_result.multi_handedness):
-            side = handedness.classification[0].label.lower()
-            coords = np.array([[lm.x, lm.y] for lm in hand_landmarks.landmark], dtype=np.float32)
+    norm     = normalize_landmarks(hand_lm)
+    smoothed = _number_smoother.smooth(norm)
+    scaled   = number_scaler.transform(smoothed.reshape(1, -1))
+    probs    = number_model.predict(scaled, verbose=0)[0]
 
-            if side == "left":
-                left_hand = coords
-            elif side == "right":
-                right_hand = coords
+    confidence = float(np.max(probs))
+    raw_label  = str(number_encoder.inverse_transform([int(np.argmax(probs))])[0])
+    voted_label, voted_conf = _number_voter.vote(raw_label, confidence)
 
-    pose_arr = np.zeros((POSE_LANDMARKS_TO_USE, 2), dtype=np.float32)
-    if pose_result.pose_landmarks:
-        pose_coords = np.array(
-            [[lm.x, lm.y] for lm in pose_result.pose_landmarks.landmark[:POSE_LANDMARKS_TO_USE]],
-            dtype=np.float32
-        )
-        pose_arr[:len(pose_coords)] = pose_coords
+    if voted_label is None or voted_conf < NUMBER_THRESHOLD:
+        return {"sign": "...", "confidence": round(confidence, 4),
+                "landmarks": visual, "committed": False, "hold_progress": 0.0}
 
-    features = np.concatenate([
-        left_hand.flatten(),   # 42
-        right_hand.flatten(),  # 42
-        pose_arr.flatten()     # 50
-    ])  # total = 134
-
-    return features.astype(np.float32)
-
-
-def normalize_sequence(sequence):
-    sequence = np.array(sequence, dtype=np.float32)
-    mean = sequence.mean(axis=0, keepdims=True)
-    std = sequence.std(axis=0, keepdims=True) + 1e-6
-    return (sequence - mean) / std
-
-
-# =========================
-# PREDICTORS
-# =========================
-def predict_alphabet(base64_image):
-    features, visual = extract_hand_xyz_features_and_visual(base64_image)
-
-    if features is None:
-        return {"sign": "...", "confidence": 0, "landmarks": None}
-
-    features = features.reshape(1, -1)
-    features = alphabet_scaler.transform(features)
-
-    probs = alphabet_model.predict(features, verbose=0)
-    idx = np.argmax(probs)
+    (committed, hold_progress,
+     _num_current_held_sign, _num_sign_hold_start,
+     _num_last_committed_sign, _num_last_committed_time) = _apply_hold_cooldown(
+        voted_label, voted_conf,
+        _num_current_held_sign, _num_sign_hold_start,
+        _num_last_committed_sign, _num_last_committed_time,
+        _number_voter
+    )
 
     return {
-        "sign": alphabet_encoder.inverse_transform([idx])[0],
-        "confidence": float(np.max(probs)),
-        "landmarks": visual
+        "sign":          voted_label,
+        "confidence":    round(voted_conf, 4),
+        "landmarks":     visual,
+        "committed":     committed,
+        "hold_progress": round(hold_progress, 2)
     }
 
 
-def predict_number(base64_image):
-    features, visual = extract_hand_xyz_features_and_visual(base64_image)
+# ─────────────────────────────────────────────────────────────────────
+# WORD PREDICTOR — Transformer + MediaPipe Holistic
+# ─────────────────────────────────────────────────────────────────────
+def _extract_holistic_features(frame) -> np.ndarray:
+    """
+    Extract normalized both-hand features using MediaPipe Holistic.
+    Returns (126,) feature vector — 21 landmarks × 2 hands × 3 (x,y,z).
+    Missing hand → zeros (model learned this means hand not visible).
+    """
+    result = holistic.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-    if features is None:
-        return {"sign": "...", "confidence": 0, "landmarks": None}
+    left  = np.zeros((21, 3), dtype=np.float32)
+    right = np.zeros((21, 3), dtype=np.float32)
 
-    # Model was trained with 64 features, but live extraction gives 63.
-    # Append one missing feature as NaN so the saved imputer fills it.
-    features_64 = np.append(features, np.nan).reshape(1, -1)
+    if result.left_hand_landmarks:
+        lm    = result.left_hand_landmarks.landmark
+        left  = np.array([[l.x, l.y, l.z] for l in lm], dtype=np.float32)
+        left -= left[0]
+        ref   = np.linalg.norm(left[9])
+        if ref > 1e-6:
+            left /= ref
 
-    features_64 = number_imputer.transform(features_64)
-    features_64 = number_scaler.transform(features_64)
+    if result.right_hand_landmarks:
+        lm     = result.right_hand_landmarks.landmark
+        right  = np.array([[l.x, l.y, l.z] for l in lm], dtype=np.float32)
+        right -= right[0]
+        ref    = np.linalg.norm(right[9])
+        if ref > 1e-6:
+            right /= ref
 
-    probs = number_model.predict(features_64, verbose=0)
-    idx = np.argmax(probs)
+    return np.concatenate([left.flatten(), right.flatten()])  # (126,)
+
+
+def _resample_sequence(seq, target_len=WORD_SEQ_LEN) -> np.ndarray:
+    """
+    Resample variable-length frame sequence to fixed length.
+    Uses linear interpolation — same method used during training.
+    """
+    seq = np.array(seq, dtype=np.float32)
+    if len(seq) == 0:
+        return np.zeros((target_len, WORD_FEAT_DIM), dtype=np.float32)
+    if len(seq) == target_len:
+        return seq
+    if len(seq) == 1:
+        return np.tile(seq[0], (target_len, 1))
+
+    x_old     = np.linspace(0, 1, len(seq))
+    x_new     = np.linspace(0, 1, target_len)
+    resampled = np.zeros((target_len, WORD_FEAT_DIM), dtype=np.float32)
+    for i in range(WORD_FEAT_DIM):
+        resampled[:, i] = interp1d(x_old, seq[:, i], kind='linear')(x_new)
+    return resampled
+
+
+def _run_word_prediction() -> dict:
+    """
+    Run Transformer model on buffered frames.
+    Returns top-3 predictions always, sets ready=True above threshold.
+    """
+    seq    = _resample_sequence(_word_frame_buffer, WORD_SEQ_LEN)  # (30, 126)
+    flat   = seq.reshape(WORD_SEQ_LEN, WORD_FEAT_DIM)
+    scaled = word_scaler.transform(flat)
+    seq_sc = scaled.reshape(1, WORD_SEQ_LEN, WORD_FEAT_DIM)
+
+    probs = word_model.predict(seq_sc, verbose=0)[0]
+
+    # Always return top-3 so frontend can show suggestions
+    top3_idx = np.argsort(probs)[-3:][::-1]
+    top3 = [
+        {
+            "word":       word_encoder.inverse_transform([int(i)])[0],
+            "confidence": round(float(probs[i]), 4)
+        }
+        for i in top3_idx
+    ]
+
+    best_conf = top3[0]["confidence"]
+    best_word = top3[0]["word"]
 
     return {
-        "sign": str(number_encoder.inverse_transform([idx])[0]),
-        "confidence": float(np.max(probs)),
-        "landmarks": visual
+        "sign":       best_word,
+        "confidence": best_conf,
+        "ready":      best_conf >= WORD_THRESHOLD,
+        "top3":       top3       # frontend shows these as suggestion buttons
     }
 
 
-def predict_word(base64_image):
-    global frame_buffer
+def predict_word(base64_image: str) -> dict:
+    """
+    WebSocket handler for /ws/predict/word.
 
-    features = extract_word_frame_features(base64_image)
+    Flow:
+      - While hand is visible: collect frames into buffer
+      - When hand disappears (sign complete): run prediction
+      - Returns top-3 word suggestions so frontend can show buttons
 
-    if features is None:
-        frame_buffer.clear()
-        return {"sign": "...", "confidence": 0, "ready": False}
+    Returns:
+      sign       — best predicted word ("..." while collecting)
+      confidence — float
+      ready      — bool: True = prediction complete, show result
+      top3       — list of {word, confidence} for suggestion UI
+      collecting — bool: True = currently recording a sign
+      frames     — int: frames collected so far
+    """
+    global _word_frame_buffer, _word_is_collecting
 
-    frame_buffer.append(features)
+    if word_model is None:
+        return {"sign": "...", "confidence": 0.0, "ready": False,
+                "top3": [], "collecting": False, "frames": 0}
 
-    if len(frame_buffer) > SEQUENCE_LENGTH:
-        frame_buffer = frame_buffer[-SEQUENCE_LENGTH:]
+    frame = decode_base64_image(base64_image)
+    if frame is None:
+        _word_frame_buffer.clear()
+        _word_is_collecting = False
+        return {"sign": "...", "confidence": 0.0, "ready": False,
+                "top3": [], "collecting": False, "frames": 0}
 
-    if len(frame_buffer) < SEQUENCE_LENGTH:
-        return {"sign": "...", "confidence": 0, "ready": False}
+    features    = _extract_holistic_features(frame)
+    hand_present = np.any(features != 0)   # zeros = no hand detected
 
-    seq = normalize_sequence(frame_buffer)
-    seq = seq.reshape(1, SEQUENCE_LENGTH, 134)
+    if hand_present:
+        # ── Collecting phase ──────────────────────────────────────────
+        _word_is_collecting = True
+        _word_frame_buffer.append(features)
 
-    probs = word_model.predict(seq, verbose=0)
-    idx = np.argmax(probs)
+        # Rolling window cap — prevent unbounded growth
+        if len(_word_frame_buffer) > WORD_SEQ_LEN * 3:
+            _word_frame_buffer = _word_frame_buffer[-(WORD_SEQ_LEN * 2):]
 
-    return {
-        "sign": word_encoder.inverse_transform([idx])[0],
-        "confidence": float(np.max(probs)),
-        "ready": True
-    }
+        return {
+            "sign":       "...",
+            "confidence": 0.0,
+            "ready":      False,
+            "top3":       [],
+            "collecting": True,
+            "frames":     len(_word_frame_buffer)
+        }
+
+    else:
+        # ── Hand gone — predict if we have enough frames ───────────────
+        if _word_is_collecting and len(_word_frame_buffer) >= WORD_MIN_FRAMES:
+            result = _run_word_prediction()
+            _word_frame_buffer.clear()
+            _word_is_collecting = False
+            return result
+
+        # Not enough frames or wasn't collecting — reset silently
+        _word_frame_buffer.clear()
+        _word_is_collecting = False
+        return {
+            "sign":       "...",
+            "confidence": 0.0,
+            "ready":      False,
+            "top3":       [],
+            "collecting": False,
+            "frames":     0
+        }

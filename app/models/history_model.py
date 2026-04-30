@@ -13,3 +13,7 @@ class TranslationRequest(BaseModel):
     text: str
     target_lang: str
     source_lang: str = "auto"
+
+class TTSRequest(BaseModel):
+    text: str
+    language_code: str = "en"
