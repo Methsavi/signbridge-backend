@@ -1,3 +1,4 @@
+import traceback
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.controllers.recognition_controller import (
     predict_alphabet,
@@ -14,7 +15,13 @@ async def alphabet_ws(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            result = predict_alphabet(data)
+            try:
+                result = predict_alphabet(data)
+            except Exception as exc:
+                traceback.print_exc()
+                result = {"sign": "...", "confidence": 0.0, "landmarks": None,
+                          "committed": False, "hold_progress": 0.0,
+                          "error": str(exc)}
             await websocket.send_json(result)
     except WebSocketDisconnect:
         print("Alphabet WS disconnected")
@@ -26,7 +33,13 @@ async def number_ws(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            result = predict_number(data)
+            try:
+                result = predict_number(data)
+            except Exception as exc:
+                traceback.print_exc()
+                result = {"sign": "...", "confidence": 0.0, "landmarks": None,
+                          "committed": False, "hold_progress": 0.0,
+                          "error": str(exc)}
             await websocket.send_json(result)
     except WebSocketDisconnect:
         print("Number WS disconnected")
@@ -38,7 +51,13 @@ async def word_ws(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            result = predict_word(data)
+            try:
+                result = predict_word(data)
+            except Exception as exc:
+                traceback.print_exc()
+                result = {"sign": "...", "confidence": 0.0, "ready": False,
+                          "top3": [], "collecting": False, "frames": 0,
+                          "error": str(exc)}
             await websocket.send_json(result)
     except WebSocketDisconnect:
         print("Word WS disconnected")
