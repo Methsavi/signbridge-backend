@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 from app.core.database import get_database
 from app.models.user_model import User, UserLogin, AdminUserCreate, AdminUserUpdate
 from passlib.context import CryptContext
@@ -307,6 +308,161 @@ def list_admins(search: str | None = None):
 
 
 # --- THE UPLOAD FUNCTION ---
+def get_analytics_stats():
+    """Return rich analytics data for the admin Analytics dashboard."""
+    db = get_database()
+    users_col = db["users"]
+    history_col = db["history"]
+    dictionary_col = db["dictionary"]
+
+    now = datetime.now(timezone.utc)
+
+    # ── 1. Translations per day (last 30 days) ───────────────────────────────
+    thirty_days_ago = now - timedelta(days=30)
+    pipeline_daily = [
+        {"$match": {"timestamp": {"$gte": thirty_days_ago}}},
+        {
+            "$group": {
+                "_id": {
+                    "$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}
+                },
+                "count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"_id": 1}},
+    ]
+    daily_raw = list(history_col.aggregate(pipeline_daily))
+    # Fill gaps so every day in the range appears
+    daily_map = {d["_id"]: d["count"] for d in daily_raw}
+    translations_per_day = []
+    for i in range(30):
+        day = (thirty_days_ago + timedelta(days=i + 1)).strftime("%Y-%m-%d")
+        translations_per_day.append({"date": day, "count": daily_map.get(day, 0)})
+
+    # ── 2. User registrations per month (last 12 months) ────────────────────
+    # Use $addFields to coalesce created_at with the ObjectId generation time,
+    # so users without a created_at field are still counted.
+    pipeline_monthly = [
+        {
+            "$addFields": {
+                "reg_date": {
+                    "$ifNull": ["$created_at", {"$toDate": "$_id"}]
+                }
+            }
+        },
+        {"$match": {"reg_date": {"$gte": now - timedelta(days=365)}}},
+        {
+            "$group": {
+                "_id": {
+                    "$dateToString": {"format": "%Y-%m", "date": "$reg_date"}
+                },
+                "new_users": {"$sum": 1},
+            }
+        },
+        {"$sort": {"_id": 1}},
+    ]
+    monthly_raw = list(users_col.aggregate(pipeline_monthly))
+    monthly_map = {m["_id"]: m["new_users"] for m in monthly_raw}
+
+    # Count ALL users registered before the 12-month window as starting baseline
+    existing_users_count = users_col.count_documents({})
+    for v in monthly_map.values():
+        existing_users_count -= v
+    running_total = max(0, existing_users_count)
+
+    # Build a proper calendar-month sequence (no timedelta drift)
+    registrations_per_month = []
+    cursor_year = now.year
+    cursor_month = now.month
+    months_ordered = []
+    for _ in range(12):
+        months_ordered.append((cursor_year, cursor_month))
+        cursor_month -= 1
+        if cursor_month == 0:
+            cursor_month = 12
+            cursor_year -= 1
+    months_ordered.reverse()
+
+    for (yr, mo) in months_ordered:
+        month_key = f"{yr:04d}-{mo:02d}"
+        month_label = datetime(yr, mo, 1).strftime("%b %Y")
+        new = monthly_map.get(month_key, 0)
+        running_total += new
+        registrations_per_month.append({
+            "month": month_label,
+            "new_users": new,
+            "total_users": running_total,
+        })
+
+    # ── 3. Language usage distribution ───────────────────────────────────────
+    pipeline_lang = [
+        {"$group": {"_id": "$target_language", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 10},
+    ]
+    lang_raw = list(history_col.aggregate(pipeline_lang))
+    language_distribution = [
+        {"language": item["_id"] or "Unknown", "count": item["count"]}
+        for item in lang_raw
+    ]
+
+    # ── 4. Top translators (users with most history entries) ─────────────────
+    pipeline_top_users = [
+        {"$group": {"_id": "$user_id", "translations": {"$sum": 1}}},
+        {"$sort": {"translations": -1}},
+        {"$limit": 8},
+    ]
+    top_raw = list(history_col.aggregate(pipeline_top_users))
+    top_translators = []
+    for item in top_raw:
+        uid = item["_id"]
+        user_doc = None
+        if uid:
+            if ObjectId.is_valid(uid):
+                user_doc = users_col.find_one({"_id": ObjectId(uid)}, {"username": 1, "email": 1})
+            if not user_doc:
+                user_doc = users_col.find_one({"appwrite_id": uid}, {"username": 1, "email": 1})
+        username = (
+            user_doc.get("username") if user_doc else None
+        ) or (uid[:8] + "..." if uid else "Unknown")
+        top_translators.append({"username": username, "translations": item["translations"]})
+
+    # ── 5. Dictionary entries by category ────────────────────────────────────
+    pipeline_dict = [
+        {"$group": {"_id": "$category", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+    ]
+    dict_raw = list(dictionary_col.aggregate(pipeline_dict))
+    dictionary_by_category = [
+        {"category": item["_id"] or "Uncategorized", "count": item["count"]}
+        for item in dict_raw
+    ]
+    total_dictionary_entries = sum(d["count"] for d in dictionary_by_category)
+
+    # ── 6. Total translations overall ────────────────────────────────────────
+    total_translations = history_col.count_documents({})
+
+    # ── 7. Translations this month vs last month ──────────────────────────────
+    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    start_of_last_month = (start_of_month - timedelta(days=1)).replace(day=1)
+    translations_this_month = history_col.count_documents({"timestamp": {"$gte": start_of_month}})
+    translations_last_month = history_col.count_documents({
+        "timestamp": {"$gte": start_of_last_month, "$lt": start_of_month}
+    })
+
+    return {
+        "translations_per_day": translations_per_day,
+        "registrations_per_month": registrations_per_month,
+        "language_distribution": language_distribution,
+        "top_translators": top_translators,
+        "dictionary_by_category": dictionary_by_category,
+        "total_translations": total_translations,
+        "total_dictionary_entries": total_dictionary_entries,
+        "translations_this_month": translations_this_month,
+        "translations_last_month": translations_last_month,
+    }
+
+
 def update_profile_picture(
     user_id: str,
     file_data: bytes,
