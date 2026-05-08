@@ -30,7 +30,7 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- STARTUP ---
-    print("🚀 Starting SignBridge Backend...")
+    print("Starting SignBridge Backend...")
     connect_to_mongodb()
     ensure_profile_image_directory()
 
@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
 
     yield
     # --- SHUTDOWN ---
-    print("🛑 Shutting down SignBridge Backend...")
+    print("Shutting down SignBridge Backend...")
     close_mongodb_connection()
 
 

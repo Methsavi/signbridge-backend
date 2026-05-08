@@ -4,6 +4,7 @@ from app.controllers.user_controller import (
     login_user_mongo,
     update_profile_picture,
     get_admin_dashboard_stats,
+    get_analytics_stats,
     list_users_admin,
     create_user_admin,
     update_user_admin,
@@ -97,6 +98,15 @@ async def upload_profile_pic(
 def get_dashboard_stats():
     try:
         return get_admin_dashboard_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- ADMIN ANALYTICS ---
+@router.get("/admin/analytics", status_code=status.HTTP_200_OK)
+def get_analytics():
+    try:
+        return get_analytics_stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -38,7 +38,7 @@ def get_user_history(user_id: str):
     db = get_database()
     history_collection = db["history"]
 
-    cursor = history_collection.find({"user_id": user_id}).sort("timestamp", -1).limit(50)
+    cursor = history_collection.find({"user_id": user_id}).sort("timestamp", -1).limit(100)
 
     results = []
     for doc in cursor:
