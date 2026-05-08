@@ -1,0 +1,37 @@
+name: SignBridge Backend CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-backend:
+    name: Backend Tests (Python / pytest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          pip install \
+            fastapi \
+            uvicorn \
+            httpx \
+            pytest \
+            "pydantic[email]" \
+            email-validator \
+            python-dotenv \
+            "passlib[bcrypt]" \
+            python-multipart \
+            numpy \
+            starlette
+
+      - name: Run tests
+        run: pytest tests/ -v
