@@ -190,3 +190,187 @@ def test_feedback_success(client):
             "message": "Great sign language app!",
         })
     assert response.status_code == 201
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEXT-TO-SPEECH
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_tts_missing_fields(client):
+    """TTS request with empty body should return 422."""
+    response = client.post("/features/tts", json={})
+    assert response.status_code == 422
+
+
+def test_tts_success(client):
+    """Valid TTS request should return 200 with audio/mpeg content."""
+    fake_audio = b"fake-mp3-audio-bytes"
+    with patch("app.routes.feature_routes.synthesize_speech", return_value=fake_audio):
+        response = client.post("/features/tts", json={
+            "text": "Hello",
+            "language_code": "en",
+        })
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mpeg"
+
+
+def test_tts_missing_api_key(client):
+    """TTS should return 503 when the API key is not configured."""
+    with patch("app.routes.feature_routes.synthesize_speech",
+               side_effect=ValueError("API key not configured")):
+        response = client.post("/features/tts", json={
+            "text": "Hello",
+            "language_code": "en",
+        })
+    assert response.status_code == 503
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRANSLATION HISTORY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_get_history_success(client):
+    """Get history for a user should return 200 with a list."""
+    mock_history = [
+        {"original_text": "Hello", "translated_text": "Hola", "target_language": "es"}
+    ]
+    with patch("app.routes.feature_routes.get_user_history", return_value=mock_history):
+        response = client.get("/features/history/user123")
+    assert response.status_code == 200
+
+
+def test_save_history_missing_fields(client):
+    """Saving history with empty body should return 422."""
+    response = client.post("/features/history", json={})
+    assert response.status_code == 422
+
+
+def test_save_history_success(client):
+    """Valid history save should return 200."""
+    mock_result = {"id": "hist123", "status": "saved"}
+    with patch("app.routes.feature_routes.save_translation_history", return_value=mock_result):
+        response = client.post("/features/history", json={
+            "user_id": "user123",
+            "original_text": "Hello",
+            "translated_text": "Hola",
+            "target_language": "es",
+        })
+    assert response.status_code == 200
+
+
+def test_delete_history_success(client):
+    """Deleting a history item should return 200."""
+    mock_result = {"status": "deleted"}
+    with patch("app.routes.feature_routes.delete_history_item", return_value=mock_result):
+        response = client.delete("/features/history/hist123?user_id=user123")
+    assert response.status_code == 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DICTIONARY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_get_dictionary_entries(client):
+    """GET /dictionary/ should return 200 with items list."""
+    mock_entries = [{"label": "A", "category": "letter", "media_type": "image", "media_url": "http://example.com/a.jpg"}]
+    with patch("app.routes.dictionary_routes.list_entries", return_value=mock_entries):
+        response = client.get("/dictionary/")
+    assert response.status_code == 200
+    assert "items" in response.json()
+
+
+def test_get_dictionary_entry_not_found(client):
+    """GET /dictionary/{id} with unknown ID should return 404."""
+    with patch("app.routes.dictionary_routes.get_entry", return_value=None):
+        response = client.get("/dictionary/nonexistent123")
+    assert response.status_code == 404
+
+
+def test_create_dictionary_entry_missing_fields(client):
+    """Creating a dictionary entry with empty body should return 422."""
+    response = client.post("/dictionary/", json={})
+    assert response.status_code == 422
+
+
+def test_create_dictionary_entry_invalid_category(client):
+    """Creating an entry with an invalid category should return 422."""
+    response = client.post("/dictionary/", json={
+        "label": "Hello",
+        "category": "invalid_category",
+        "media_type": "image",
+        "media_url": "http://example.com/hello.jpg",
+    })
+    assert response.status_code == 422
+
+
+def test_create_dictionary_entry_success(client):
+    """Valid dictionary entry creation should return 201."""
+    mock_result = {"id": "dict123", "label": "Hello", "category": "word"}
+    with patch("app.routes.dictionary_routes.create_entry", return_value=mock_result):
+        response = client.post("/dictionary/", json={
+            "label": "Hello",
+            "category": "word",
+            "media_type": "video",
+            "media_url": "http://example.com/hello.mp4",
+        })
+    assert response.status_code == 201
+
+
+def test_delete_dictionary_entry_not_found(client):
+    """Deleting a non-existent dictionary entry should return 404."""
+    with patch("app.routes.dictionary_routes.delete_entry",
+               return_value={"error": "Entry not found"}):
+        response = client.delete("/dictionary/nonexistent123")
+    assert response.status_code == 404
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USER PROFILE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_get_user_profile_success(client):
+    """GET /users/{user_id} should return 200 with user details."""
+    mock_user = {
+        "_id": "abc123",
+        "username": "testuser",
+        "email": "test@example.com",
+        "profile_picture": None,
+    }
+    with patch("app.routes.user_routes.get_database") as mock_db:
+        mock_db.return_value.__getitem__.return_value.find_one.return_value = mock_user
+        response = client.get("/users/abc123")
+    assert response.status_code == 200
+
+
+def test_get_user_profile_invalid_id(client):
+    """GET /users/{user_id} with a bad ID format should return 500."""
+    response = client.get("/users/not-a-valid-id")
+    assert response.status_code == 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN — FEEDBACK STATS & LIST
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_admin_feedback_stats(client):
+    """GET /feedbacks/admin/stats should return 200."""
+    mock_stats = {"total": 10, "average_rating": 4.2}
+    with patch("app.routes.feedback_routes.get_feedback_stats", return_value=mock_stats):
+        response = client.get("/feedbacks/admin/stats")
+    assert response.status_code == 200
+
+
+def test_admin_list_feedbacks(client):
+    """GET /feedbacks/admin/all should return 200 with items."""
+    mock_items = [{"user_id": "u1", "rating": 5, "message": "Great!"}]
+    with patch("app.routes.feedback_routes.list_feedbacks", return_value=mock_items):
+        response = client.get("/feedbacks/admin/all")
+    assert response.status_code == 200
+    assert "items" in response.json()
+
+
+def test_admin_dashboard_stats(client):
+    """GET /users/admin/dashboard-stats should return 200."""
+    mock_stats = {"total_users": 50, "active_users": 42}
+    with patch("app.routes.user_routes.get_admin_dashboard_stats", return_value=mock_stats):
+        response = client.get("/users/admin/dashboard-stats")
+    assert response.status_code == 200
