@@ -15,6 +15,56 @@ import warnings
 from collections import deque
 from scipy.interpolate import interp1d
 
+# Monkeypatch Keras deserialization to remove unsupported 'quantization_config'
+# entries which cause deserialization errors when model was saved with
+# quantization metadata. This is a minimal, targeted compatibility fix...
+try:
+    # Import internal serialization module used by Keras
+    import keras.src.saving.serialization_lib as _serialization_lib
+except Exception:
+    import keras.saving.serialization_lib as _serialization_lib
+
+_original_deserialize = getattr(_serialization_lib, 'deserialize_keras_object', None)
+
+def _strip_quantization(obj):
+    if isinstance(obj, dict):
+        return {k: _strip_quantization(v) for k, v in obj.items() if k != 'quantization_config'}
+    if isinstance(obj, list):
+        return [_strip_quantization(v) for v in obj]
+    return obj
+
+
+def _deserialize_wrapper(config, *args, **kwargs):
+    try:
+        cleaned = _strip_quantization(config)
+    except Exception:
+        cleaned = config
+    return _original_deserialize(cleaned, *args, **kwargs)
+
+# Apply monkeypatch if possible
+if _original_deserialize is not None:
+    _serialization_lib.deserialize_keras_object = _deserialize_wrapper
+
+# Compatibility shim: some saved models include a 'quantization_config' field
+# in layer configs which older/newer Keras Dense doesn't accept during
+# deserialization. Provide a wrapper that accepts and ignores that kwarg and
+# pass it via custom_objects when loading models.
+# Use tf.keras.layers.Dense as the base so the class identity matches what
+# tf.keras expects when deserializing models saved under TensorFlow/Keras.
+from tensorflow.keras.layers import Dense as _KerasDense
+class DenseCompat(_KerasDense):
+    def __init__(self, *args, quantization_config=None, **kwargs):
+        # Accept and ignore 'quantization_config' used by some toolchains
+        super().__init__(*args, **kwargs)
+
+# Register multiple possible keys that appear in serialized configs so
+# deserialize_keras_object can resolve to our compatibility class.
+_CUSTOM_OBJECTS = {
+    'Dense': DenseCompat,
+    'keras.layers.Dense': DenseCompat,
+    'tensorflow.keras.layers.Dense': DenseCompat,
+}
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ─────────────────────────────────────────────────────────────────────
@@ -50,7 +100,7 @@ COOLDOWN_AFTER = 3.0   # seconds before same sign can commit again
 # Word model config — must match training
 WORD_SEQ_LEN   = 30
 WORD_FEAT_DIM  = 126   # 21 landmarks × 2 hands × 3 (x,y,z)
-WORD_MIN_FRAMES = 8
+WORD_MIN_FRAMES = 2
 
 # ─────────────────────────────────────────────────────────────────────
 # GLOBALS
@@ -140,17 +190,16 @@ def load_ai_models():
     global hands, holistic, pose
 
     print("BASE_DIR:", BASE_DIR)
-    print("🚀 Loading ALL AI models...")
+    print("Loading ALL AI models...")
 
-    # ── Alphabet ──────────────────────────────────────────────────────
-    print("\n--- Alphabet ---")
+    # \u2500\u2500 Alphabet \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    print("\n--- Alphabet ---")
     print("  model  :", ALPHABET_MODEL,   "| exists:", os.path.exists(ALPHABET_MODEL))
     print("  scaler :", ALPHABET_SCALER,  "| exists:", os.path.exists(ALPHABET_SCALER))
     print("  encoder:", ALPHABET_ENCODER, "| exists:", os.path.exists(ALPHABET_ENCODER))
-    alphabet_model   = tf.keras.models.load_model(ALPHABET_MODEL)
+    alphabet_model   = tf.keras.models.load_model(ALPHABET_MODEL, custom_objects=_CUSTOM_OBJECTS)
     alphabet_scaler  = joblib.load(ALPHABET_SCALER)
     alphabet_encoder = joblib.load(ALPHABET_ENCODER)
-    print("  ✅ Alphabet model loaded")
+    print("  Alphabet model loaded")
 
     # ── Number ────────────────────────────────────────────────────────
     print("\n--- Number ---")
@@ -158,12 +207,12 @@ def load_ai_models():
     print("  scaler :", NUMBER_SCALER,  "| exists:", os.path.exists(NUMBER_SCALER))
     print("  encoder:", NUMBER_ENCODER, "| exists:", os.path.exists(NUMBER_ENCODER))
     if os.path.exists(NUMBER_MODEL):
-        number_model   = tf.keras.models.load_model(NUMBER_MODEL)
+        number_model   = tf.keras.models.load_model(NUMBER_MODEL, custom_objects=_CUSTOM_OBJECTS)
         number_scaler  = joblib.load(NUMBER_SCALER)
         number_encoder = joblib.load(NUMBER_ENCODER)
-        print("  ✅ Number model loaded")
+        print("  Number model loaded")
     else:
-        print("  ⚠️  Number model not found — skipping")
+        print("  Number model not found — skipping")
 
     # ── Word (new Transformer) ────────────────────────────────────────
     print("\n--- Word ---")
@@ -171,40 +220,48 @@ def load_ai_models():
     print("  encoder:", WORD_ENCODER, "| exists:", os.path.exists(WORD_ENCODER))
     print("  scaler :", WORD_SCALER,  "| exists:", os.path.exists(WORD_SCALER))
     if os.path.exists(WORD_MODEL):
-        word_model   = tf.keras.models.load_model(WORD_MODEL)
+        word_model   = tf.keras.models.load_model(WORD_MODEL, custom_objects=_CUSTOM_OBJECTS)
         word_encoder = joblib.load(WORD_ENCODER)
         word_scaler  = joblib.load(WORD_SCALER)
-        print("  ✅ Word model loaded (Transformer)")
+        print("  Word model loaded (Transformer)")
     else:
-        print("  ⚠️  Word model not found — skipping")
+        print("  Word model not found — skipping")
 
-    # ── MediaPipe ─────────────────────────────────────────────────────
-    import mediapipe as mp
+    # ── MediaPipe HandLandmarker (Tasks API) ──────────────────────────
+    HAND_TASK = os.path.join(BASE_DIR, "model_dev", "hand_landmarker.task")
+    if not os.path.exists(HAND_TASK):
+        print(f"  hand_landmarker.task not found at {HAND_TASK}")
+        print("  Recognition features will be disabled.")
+        hands = None
+        holistic = None
+        pose = None
+    else:
+        from mediapipe.tasks import python as _mp_tasks
+        from mediapipe.tasks.python import vision as _mp_vision
 
-    # Hands — for alphabet and number (single hand, fast)
-    hands = mp.solutions.hands.Hands(
-        static_image_mode=False,
-        max_num_hands=1,
-        min_detection_confidence=0.6,
-        min_tracking_confidence=0.5,
-        model_complexity=1
-    )
+        _base_opts_single = _mp_tasks.BaseOptions(model_asset_path=HAND_TASK)
+        _single_opts = _mp_vision.HandLandmarkerOptions(
+            base_options=_base_opts_single,
+            num_hands=1,
+            min_hand_detection_confidence=0.5,
+            min_hand_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        hands = _mp_vision.HandLandmarker.create_from_options(_single_opts)
 
-    # Holistic — for word mode (captures both hands simultaneously)
-    holistic = mp.solutions.holistic.Holistic(
-        static_image_mode=False,
-        model_complexity=1,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.4
-    )
+        _base_opts_dual = _mp_tasks.BaseOptions(model_asset_path=HAND_TASK)
+        _dual_opts = _mp_vision.HandLandmarkerOptions(
+            base_options=_base_opts_dual,
+            num_hands=2,
+            min_hand_detection_confidence=0.5,
+            min_hand_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        holistic = _mp_vision.HandLandmarker.create_from_options(_dual_opts)
+        pose = None
+        print("  MediaPipe HandLandmarker initialised (Tasks API)")
 
-    # Pose — kept for backward compatibility
-    pose = mp.solutions.pose.Pose(
-        static_image_mode=False,
-        min_detection_confidence=0.5
-    )
-
-    print("\n✅ All models loaded successfully!")
+    print("\nAll models loaded successfully!")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -225,8 +282,10 @@ def normalize_landmarks(hand_landmarks):
     2. Center at wrist (index 0)
     3. Scale by wrist→middle-MCP distance (index 9)
     4. Flatten to 63 features
+
+    hand_landmarks: List[NormalizedLandmark] from Tasks API HandLandmarker
     """
-    lm  = np.array([[l.x, l.y, l.z] for l in hand_landmarks.landmark])
+    lm  = np.array([[l.x, l.y, l.z] for l in hand_landmarks])
     lm -= lm[0]
     ref = np.linalg.norm(lm[9])
     if ref > 1e-6:
@@ -236,7 +295,7 @@ def normalize_landmarks(hand_landmarks):
 
 def extract_visual_landmarks(hand_landmarks):
     """Raw x,y for frontend skeleton drawing (un-normalized screen coords)."""
-    return [{"x": lm.x, "y": lm.y} for lm in hand_landmarks.landmark]
+    return [{"x": lm.x, "y": lm.y} for lm in hand_landmarks]
 
 
 def _apply_hold_cooldown(voted_label, voted_conf,
@@ -291,14 +350,25 @@ def predict_alphabet(base64_image: str) -> dict:
     global _last_committed_sign, _last_committed_time
     global _sign_hold_start, _current_held_sign
 
+    # If MediaPipe or the alphabet model is not available, return an informative response
+    if hands is None or alphabet_model is None or alphabet_scaler is None or alphabet_encoder is None:
+        return {"sign": "...", "confidence": 0.0, "landmarks": None,
+                "committed": False, "hold_progress": 0.0,
+                "error": "recognition_unavailable", "reason": "mediapipe or alphabet model missing"}
+
     frame = decode_base64_image(base64_image)
     if frame is None:
         return {"sign": "...", "confidence": 0.0, "landmarks": None,
                 "committed": False, "hold_progress": 0.0}
 
-    result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    # Convert to MediaPipe Image
+    from mediapipe.tasks.python.vision.core import image as image_lib
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = image_lib.Image(image_format=image_lib.ImageFormat.SRGB, data=rgb_frame)
 
-    if not result.multi_hand_landmarks:
+    result = hands.detect(mp_image)
+
+    if not result.hand_landmarks or len(result.hand_landmarks) == 0:
         _alphabet_smoother.reset()
         _alphabet_voter.reset()
         _current_held_sign = None
@@ -306,7 +376,7 @@ def predict_alphabet(base64_image: str) -> dict:
         return {"sign": "...", "confidence": 0.0, "landmarks": None,
                 "committed": False, "hold_progress": 0.0}
 
-    hand_lm = result.multi_hand_landmarks[0]
+    hand_lm = result.hand_landmarks[0]
     visual  = extract_visual_landmarks(hand_lm)
 
     norm     = normalize_landmarks(hand_lm)
@@ -353,6 +423,12 @@ def predict_number(base64_image: str) -> dict:
     global _num_last_committed_sign, _num_last_committed_time
     global _num_sign_hold_start, _num_current_held_sign
 
+    # If MediaPipe or number model isn't available, return informative response
+    if hands is None or number_model is None or number_scaler is None or number_encoder is None:
+        return {"sign": "...", "confidence": 0.0, "landmarks": None,
+                "committed": False, "hold_progress": 0.0,
+                "error": "recognition_unavailable", "reason": "mediapipe or number model missing"}
+
     if number_model is None:
         return {"sign": "...", "confidence": 0.0, "landmarks": None,
                 "committed": False, "hold_progress": 0.0}
@@ -362,9 +438,14 @@ def predict_number(base64_image: str) -> dict:
         return {"sign": "...", "confidence": 0.0, "landmarks": None,
                 "committed": False, "hold_progress": 0.0}
 
-    result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    # Convert to MediaPipe Image
+    from mediapipe.tasks.python.vision.core import image as image_lib
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = image_lib.Image(image_format=image_lib.ImageFormat.SRGB, data=rgb_frame)
 
-    if not result.multi_hand_landmarks:
+    result = hands.detect(mp_image)
+
+    if not result.hand_landmarks or len(result.hand_landmarks) == 0:
         _number_smoother.reset()
         _number_voter.reset()
         _num_current_held_sign = None
@@ -372,7 +453,7 @@ def predict_number(base64_image: str) -> dict:
         return {"sign": "...", "confidence": 0.0, "landmarks": None,
                 "committed": False, "hold_progress": 0.0}
 
-    hand_lm = result.multi_hand_landmarks[0]
+    hand_lm = result.hand_landmarks[0]
     visual  = extract_visual_landmarks(hand_lm)
 
     norm     = normalize_landmarks(hand_lm)
@@ -411,30 +492,37 @@ def predict_number(base64_image: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────
 def _extract_holistic_features(frame) -> np.ndarray:
     """
-    Extract normalized both-hand features using MediaPipe Holistic.
+    Extract normalized both-hand features using HandLandmarker (Tasks API, 2 hands).
     Returns (126,) feature vector — 21 landmarks × 2 hands × 3 (x,y,z).
     Missing hand → zeros (model learned this means hand not visible).
+
+    Handedness 'Left'/'Right' is from the camera's mirrored perspective:
+    Tasks API reports 'Left' when the hand appears on the left side of the
+    image (which is the person's right hand).  The convention here matches
+    whatever was used during training data collection.
     """
-    result = holistic.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    from mediapipe.tasks.python.vision.core import image as image_lib
+
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = image_lib.Image(image_format=image_lib.ImageFormat.SRGB, data=rgb_frame)
+    result = holistic.detect(mp_image)
 
     left  = np.zeros((21, 3), dtype=np.float32)
     right = np.zeros((21, 3), dtype=np.float32)
 
-    if result.left_hand_landmarks:
-        lm    = result.left_hand_landmarks.landmark
-        left  = np.array([[l.x, l.y, l.z] for l in lm], dtype=np.float32)
-        left -= left[0]
-        ref   = np.linalg.norm(left[9])
+    for i, hand_lms in enumerate(result.hand_landmarks):
+        if i >= len(result.handedness):
+            break
+        category = result.handedness[i][0].category_name  # 'Left' or 'Right'
+        arr = np.array([[l.x, l.y, l.z] for l in hand_lms], dtype=np.float32)
+        arr -= arr[0]
+        ref = np.linalg.norm(arr[9])
         if ref > 1e-6:
-            left /= ref
-
-    if result.right_hand_landmarks:
-        lm     = result.right_hand_landmarks.landmark
-        right  = np.array([[l.x, l.y, l.z] for l in lm], dtype=np.float32)
-        right -= right[0]
-        ref    = np.linalg.norm(right[9])
-        if ref > 1e-6:
-            right /= ref
+            arr /= ref
+        if category == 'Left':
+            left = arr
+        else:
+            right = arr
 
     return np.concatenate([left.flatten(), right.flatten()])  # (126,)
 
@@ -512,9 +600,10 @@ def predict_word(base64_image: str) -> dict:
     """
     global _word_frame_buffer, _word_is_collecting
 
-    if word_model is None:
+    if word_model is None or holistic is None:
         return {"sign": "...", "confidence": 0.0, "ready": False,
-                "top3": [], "collecting": False, "frames": 0}
+                "top3": [], "collecting": False, "frames": 0,
+                "error": "recognition_unavailable"}
 
     frame = decode_base64_image(base64_image)
     if frame is None:
@@ -531,9 +620,9 @@ def predict_word(base64_image: str) -> dict:
         _word_is_collecting = True
         _word_frame_buffer.append(features)
 
-        # Rolling window cap — prevent unbounded growth
-        if len(_word_frame_buffer) > WORD_SEQ_LEN * 3:
-            _word_frame_buffer = _word_frame_buffer[-(WORD_SEQ_LEN * 2):]
+        # Rolling window cap — keep most recent frames for long signs (~13s at 15fps)
+        if len(_word_frame_buffer) > WORD_SEQ_LEN * 7:
+            _word_frame_buffer = _word_frame_buffer[-(WORD_SEQ_LEN * 5):]
 
         return {
             "sign":       "...",
@@ -563,3 +652,4 @@ def predict_word(base64_image: str) -> dict:
             "collecting": False,
             "frames":     0
         }
+
