@@ -6,8 +6,9 @@ from app.controllers.feature_controller import (
     get_user_history,
     delete_history_item,
     synthesize_speech,
+    convert_to_asl_gloss,
 )
-from app.models.history_model import TranslationRequest, HistoryItem, TTSRequest
+from app.models.history_model import TranslationRequest, HistoryItem, TTSRequest, GlossRequest
 
 router = APIRouter(prefix="/features", tags=["features"])
 
@@ -37,6 +38,17 @@ def text_to_speech(request: TTSRequest = Body(...)):
         if "not configured" in msg:
             raise HTTPException(status_code=503, detail=msg)
         raise HTTPException(status_code=422, detail=msg)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/asl-gloss")
+def asl_gloss(request: GlossRequest = Body(...)):
+    try:
+        result = convert_to_asl_gloss(request.text)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

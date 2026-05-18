@@ -17,3 +17,6 @@ class TranslationRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     language_code: str = "en"
+
+class GlossRequest(BaseModel):
+    text: str

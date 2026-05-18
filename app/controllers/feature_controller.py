@@ -4,6 +4,8 @@ from app.models.history_model import HistoryItem
 from datetime import datetime
 from bson import ObjectId
 from gtts import gTTS
+import requests
+import os
 import io
 
 
@@ -64,6 +66,48 @@ def delete_history_item(item_id: str, user_id: str):
             return {"error": "Item not found or permission denied"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# --- ASL GLOSS CONVERSION ---
+def convert_to_asl_gloss(text: str) -> dict:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is not configured")
+
+    prompt = (
+        "Convert the following English sentence to ASL gloss notation.\n"
+        "Rules:\n"
+        "- Remove articles (a, an, the)\n"
+        "- Remove helping verbs (is, are, am, was, were, be, been, being, do, does, did)\n"
+        "- Remove conjunctions when possible (and, but, or)\n"
+        "- Use Topic-Comment word order when appropriate (e.g. 'I am hungry' → 'HUNGRY ME')\n"
+        "- Output ONLY uppercase gloss words separated by spaces — no punctuation, no explanation\n\n"
+        f"English: {text}\n"
+        "ASL Gloss:"
+    )
+
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": 100,
+        },
+        timeout=15,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"Groq API {resp.status_code}: {resp.text}")
+
+    raw = resp.json()["choices"][0]["message"]["content"].strip().upper()
+    gloss = " ".join(w.strip(".,!?;:\"'") for w in raw.split() if w.strip(".,!?;:\"'"))
+
+    return {
+        "original": text,
+        "gloss": gloss,
+        "words": gloss.split(),
+    }
 
 
 # --- TEXT-TO-SPEECH LOGIC ---
