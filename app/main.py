@@ -50,16 +50,25 @@ app = FastAPI(title="SignBridge AI", lifespan=lifespan)
 # Explicitly list all allowed origins instead.
 FRONTEND_VERCEL_URL = os.getenv("FRONTEND_VERCEL_URL", "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+# Comma-separated extra origins (e.g. set in Azure App Service → Configuration):
+#   ALLOWED_ORIGINS=https://www.sign-bridge.live,https://sign-bridge.live
+EXTRA_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")
 
 allowed_origins = [
+    # ── Development ───────────────────────────────────────────────────
     "http://localhost:3000",
     "http://localhost:5173",
     "http://localhost:5174",
+    # ── Production (sign-bridge.live) ─────────────────────────────────
+    "https://www.sign-bridge.live",
+    "https://sign-bridge.live",
 ]
-if FRONTEND_URL and FRONTEND_URL not in allowed_origins:
-    allowed_origins.append(FRONTEND_URL)
-if FRONTEND_VERCEL_URL and FRONTEND_VERCEL_URL not in allowed_origins:
-    allowed_origins.append(FRONTEND_VERCEL_URL)
+
+# Append any URL injected via environment variables (legacy + extra)
+for _origin in [FRONTEND_URL, FRONTEND_VERCEL_URL, *EXTRA_ORIGINS.split(",")]:
+    _origin = _origin.strip()
+    if _origin and _origin not in allowed_origins:
+        allowed_origins.append(_origin)
 
 app.add_middleware(
     CORSMiddleware,
