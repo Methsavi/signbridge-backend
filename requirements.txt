@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+email-validator
 python-dotenv==1.0.0
 pymongo
 passlib[bcrypt]
