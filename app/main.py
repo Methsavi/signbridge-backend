@@ -84,4 +84,5 @@ def root():
 
 if __name__ == "__main__":
     # reload=False ensures the environment state remains stable on Windows
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False)
+    #uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False) - old one before azure deployment
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
