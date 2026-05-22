@@ -32,7 +32,14 @@ async def lifespan(app: FastAPI):
     # --- STARTUP ---
     print("Starting SignBridge Backend...")
     connect_to_mongodb()
-    ensure_profile_image_directory()
+
+    try:
+        ensure_profile_image_directory()
+    except Exception as _r2_err:
+        # R2 credentials not set — profile image upload unavailable but
+        # all other endpoints (translate, dictionary, feedback etc.) still work.
+        print(f"⚠️  R2 storage not configured: {_r2_err}")
+        print("⚠️  Profile image uploads disabled until R2 env vars are set in Azure.")
 
     # Initialize MediaPipe and TensorFlow
     load_ai_models()
