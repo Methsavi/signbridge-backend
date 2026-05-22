@@ -6,66 +6,73 @@ os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-import cv2
-import numpy as np
-import tensorflow as tf
-import joblib
 import base64
 import warnings
 from collections import deque
-from scipy.interpolate import interp1d
 
-# Monkeypatch Keras deserialization to remove unsupported 'quantization_config'
-# entries which cause deserialization errors when model was saved with
-# quantization metadata. This is a minimal, targeted compatibility fix...
+# --- OPTIONAL HEAVY ML IMPORTS ---
+# Wrapped in try/except so the app can start on servers (Azure) that don't
+# have GPU drivers or display libraries. All recognition routes already return
+# "recognition_unavailable" when these are None, so non-ML endpoints are
+# completely unaffected.
 try:
-    # Import internal serialization module used by Keras
-    import keras.src.saving.serialization_lib as _serialization_lib
-except Exception:
-    import keras.saving.serialization_lib as _serialization_lib
+    import cv2
+    import numpy as np
+    import tensorflow as tf
+    import joblib
+    from scipy.interpolate import interp1d
 
-_original_deserialize = getattr(_serialization_lib, 'deserialize_keras_object', None)
-
-def _strip_quantization(obj):
-    if isinstance(obj, dict):
-        return {k: _strip_quantization(v) for k, v in obj.items() if k != 'quantization_config'}
-    if isinstance(obj, list):
-        return [_strip_quantization(v) for v in obj]
-    return obj
-
-
-def _deserialize_wrapper(config, *args, **kwargs):
+    # Monkeypatch Keras deserialization to remove unsupported
+    # 'quantization_config' entries which cause errors when a model was saved
+    # with quantization metadata.
     try:
-        cleaned = _strip_quantization(config)
+        import keras.src.saving.serialization_lib as _serialization_lib
     except Exception:
-        cleaned = config
-    return _original_deserialize(cleaned, *args, **kwargs)
+        import keras.saving.serialization_lib as _serialization_lib
 
-# Apply monkeypatch if possible
-if _original_deserialize is not None:
-    _serialization_lib.deserialize_keras_object = _deserialize_wrapper
+    _original_deserialize = getattr(_serialization_lib, 'deserialize_keras_object', None)
 
-# Compatibility shim: some saved models include a 'quantization_config' field
-# in layer configs which older/newer Keras Dense doesn't accept during
-# deserialization. Provide a wrapper that accepts and ignores that kwarg and
-# pass it via custom_objects when loading models.
-# Use tf.keras.layers.Dense as the base so the class identity matches what
-# tf.keras expects when deserializing models saved under TensorFlow/Keras.
-from tensorflow.keras.layers import Dense as _KerasDense
-class DenseCompat(_KerasDense):
-    def __init__(self, *args, quantization_config=None, **kwargs):
-        # Accept and ignore 'quantization_config' used by some toolchains
-        super().__init__(*args, **kwargs)
+    def _strip_quantization(obj):
+        if isinstance(obj, dict):
+            return {k: _strip_quantization(v) for k, v in obj.items() if k != 'quantization_config'}
+        if isinstance(obj, list):
+            return [_strip_quantization(v) for v in obj]
+        return obj
 
-# Register multiple possible keys that appear in serialized configs so
-# deserialize_keras_object can resolve to our compatibility class.
-_CUSTOM_OBJECTS = {
-    'Dense': DenseCompat,
-    'keras.layers.Dense': DenseCompat,
-    'tensorflow.keras.layers.Dense': DenseCompat,
-}
+    def _deserialize_wrapper(config, *args, **kwargs):
+        try:
+            cleaned = _strip_quantization(config)
+        except Exception:
+            cleaned = config
+        return _original_deserialize(cleaned, *args, **kwargs)
 
-warnings.filterwarnings("ignore", category=UserWarning)
+    if _original_deserialize is not None:
+        _serialization_lib.deserialize_keras_object = _deserialize_wrapper
+
+    from tensorflow.keras.layers import Dense as _KerasDense
+    class DenseCompat(_KerasDense):
+        def __init__(self, *args, quantization_config=None, **kwargs):
+            super().__init__(*args, **kwargs)
+
+    _CUSTOM_OBJECTS = {
+        'Dense': DenseCompat,
+        'keras.layers.Dense': DenseCompat,
+        'tensorflow.keras.layers.Dense': DenseCompat,
+    }
+
+    _ML_AVAILABLE = True
+    warnings.filterwarnings("ignore", category=UserWarning)
+
+except Exception as _ml_import_error:
+    print(f"[recognition_controller] ML libraries unavailable: {_ml_import_error}")
+    print("[recognition_controller] Recognition features disabled — all other endpoints unaffected.")
+    cv2 = None
+    np = None
+    tf = None
+    joblib = None
+    interp1d = None
+    _CUSTOM_OBJECTS = {}
+    _ML_AVAILABLE = False
 
 # ─────────────────────────────────────────────────────────────────────
 # PATHS
@@ -188,6 +195,11 @@ def load_ai_models():
     global number_model, number_scaler, number_encoder
     global word_model, word_encoder, word_scaler
     global hands, holistic, pose
+
+    if not _ML_AVAILABLE:
+        print("[recognition_controller] ML libraries not available — skipping model load.")
+        print("[recognition_controller] Recognition WebSocket endpoints will return 'recognition_unavailable'.")
+        return
 
     print("BASE_DIR:", BASE_DIR)
     print("Loading ALL AI models...")
