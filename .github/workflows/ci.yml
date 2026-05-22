@@ -31,7 +31,8 @@ jobs:
             "passlib[bcrypt]" \
             python-multipart \
             numpy \
-            starlette
+            starlette \
+            requests
 
       - name: Run tests
         run: pytest tests/ -v
