@@ -348,6 +348,38 @@ def test_get_user_profile_invalid_id(client):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ASL GLOSS CONVERSION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_asl_gloss_missing_fields(client):
+    """ASL gloss request with empty body should return 422."""
+    response = client.post("/features/asl-gloss", json={})
+    assert response.status_code == 422
+
+
+def test_asl_gloss_success(client):
+    """Valid ASL gloss request should return 200 with gloss output."""
+    mock_result = {
+        "original": "I am hungry",
+        "gloss": "HUNGRY ME",
+        "words": ["HUNGRY", "ME"],
+    }
+    with patch("app.routes.feature_routes.convert_to_asl_gloss", return_value=mock_result):
+        response = client.post("/features/asl-gloss", json={"text": "I am hungry"})
+    assert response.status_code == 200
+    assert response.json()["gloss"] == "HUNGRY ME"
+    assert response.json()["words"] == ["HUNGRY", "ME"]
+
+
+def test_asl_gloss_missing_api_key(client):
+    """ASL gloss should return 503 when GROQ_API_KEY is not configured."""
+    with patch("app.routes.feature_routes.convert_to_asl_gloss",
+               side_effect=ValueError("GROQ_API_KEY is not configured")):
+        response = client.post("/features/asl-gloss", json={"text": "Hello"})
+    assert response.status_code == 503
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ADMIN — FEEDBACK STATS & LIST
 # ═══════════════════════════════════════════════════════════════════════════════
 
