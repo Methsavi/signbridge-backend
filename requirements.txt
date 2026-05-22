@@ -9,7 +9,7 @@ gtts
 boto3
 botocore
 python-multipart
-opencv-python==4.7.0.72
+opencv-python-headless
 numpy>=1.26.4,<3.0
 tensorflow==2.20.0
 keras==3.10.0
