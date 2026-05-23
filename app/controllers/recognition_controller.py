@@ -1,3 +1,6 @@
+from __future__ import annotations  # Makes all type annotations lazy strings —
+                                    # prevents np.ndarray from being evaluated
+                                    # at module load time when np=None on Azure.
 import os
 import time
 
