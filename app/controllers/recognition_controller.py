@@ -251,30 +251,41 @@ def load_ai_models():
         holistic = None
         pose = None
     else:
-        from mediapipe.tasks import python as _mp_tasks
-        from mediapipe.tasks.python import vision as _mp_vision
+        try:
+            from mediapipe.tasks import python as _mp_tasks
+            from mediapipe.tasks.python import vision as _mp_vision
 
-        _base_opts_single = _mp_tasks.BaseOptions(model_asset_path=HAND_TASK)
-        _single_opts = _mp_vision.HandLandmarkerOptions(
-            base_options=_base_opts_single,
-            num_hands=1,
-            min_hand_detection_confidence=0.5,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        hands = _mp_vision.HandLandmarker.create_from_options(_single_opts)
+            _base_opts_single = _mp_tasks.BaseOptions(model_asset_path=HAND_TASK)
+            _single_opts = _mp_vision.HandLandmarkerOptions(
+                base_options=_base_opts_single,
+                num_hands=1,
+                min_hand_detection_confidence=0.5,
+                min_hand_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+            hands = _mp_vision.HandLandmarker.create_from_options(_single_opts)
 
-        _base_opts_dual = _mp_tasks.BaseOptions(model_asset_path=HAND_TASK)
-        _dual_opts = _mp_vision.HandLandmarkerOptions(
-            base_options=_base_opts_dual,
-            num_hands=2,
-            min_hand_detection_confidence=0.5,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        holistic = _mp_vision.HandLandmarker.create_from_options(_dual_opts)
-        pose = None
-        print("  MediaPipe HandLandmarker initialised (Tasks API)")
+            _base_opts_dual = _mp_tasks.BaseOptions(model_asset_path=HAND_TASK)
+            _dual_opts = _mp_vision.HandLandmarkerOptions(
+                base_options=_base_opts_dual,
+                num_hands=2,
+                min_hand_detection_confidence=0.5,
+                min_hand_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+            holistic = _mp_vision.HandLandmarker.create_from_options(_dual_opts)
+            pose = None
+            print("  MediaPipe HandLandmarker initialised (Tasks API)")
+        except Exception as _mp_init_err:
+            # Azure App Service has no GPU / OpenGL ES (libGLESv2) — MediaPipe's
+            # HandLandmarker needs it even for CPU inference.  Degrade gracefully:
+            # all other endpoints keep working; sign recognition returns
+            # 'recognition_unavailable'.
+            print(f"  ⚠️  HandLandmarker init failed: {_mp_init_err}")
+            print("  ⚠️  Sign recognition disabled (OpenGL ES not available on this server).")
+            hands    = None
+            holistic = None
+            pose     = None
 
     print("\nAll models loaded successfully!")
 
