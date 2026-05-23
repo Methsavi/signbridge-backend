@@ -34,8 +34,10 @@ def connect_to_mongodb():
         # Test connection
         client.admin.command('ping')
 
-        # Get DB name from URI or default
-        db_name = MONGODB_URI.split("/")[-1] or "signbridge_db"
+        # Extract DB name from URI — strip query params safely.
+        # e.g. "mongodb+srv://...net/signbridge_db?retryWrites=true"
+        #       → "signbridge_db"  (not "signbridge_db?retryWrites=true")
+        db_name = MONGODB_URI.split("/")[-1].split("?")[0] or "signbridge_db"
         db = client[db_name]
 
         print("✅ Connected to Local MongoDB successfully")
