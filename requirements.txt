@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 email-validator
 python-dotenv==1.0.0
 pymongo
